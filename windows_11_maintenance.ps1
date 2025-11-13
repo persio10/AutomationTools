@@ -121,6 +121,30 @@ function Get-InvocationArguments {
     return $arguments
 }
 
+function ConvertTo-CommandLine {
+    param([string[]]$Arguments)
+
+    if (-not $Arguments) {
+        return ''
+    }
+
+    $escaped = foreach ($argument in $Arguments) {
+        if ($null -eq $argument) {
+            continue
+        }
+
+        $text = [string]$argument
+        if ($text -match '^[\w\-\.:\\/]+$') {
+            $text
+        }
+        else {
+            '"{0}"' -f ($text.Replace('"','\"'))
+        }
+    }
+
+    return ($escaped -join ' ')
+}
+
 function Restart-ScriptProcess {
     param(
         [Parameter(Mandatory)][string]$Executable,
@@ -148,23 +172,62 @@ function Restart-ScriptProcess {
     }
 
     if ($Credential) {
-        $startProcessSplat['Credential'] = $Credential
-        $startProcessSplat['LoadUserProfile'] = $true
+        $taskName = "WinMaintElevate_$([guid]::NewGuid().ToString('N'))"
+        $argumentsString = ConvertTo-CommandLine -Arguments $argumentList
+
+        $taskCleanup = {
+            param($Name)
+            if (-not $Name) {
+                return
+            }
+
+            try {
+                if (Get-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue) {
+                    Unregister-ScheduledTask -TaskName $Name -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
+                }
+            }
+            catch {
+                Write-Log -Message "Failed to remove temporary scheduled task $Name: $($_.Exception.Message)" -Level 'WARN'
+            }
+        }
+
+        try {
+            Write-Log -Message "Launching new PowerShell instance via scheduled task: $Executable"
+            Import-Module ScheduledTasks -ErrorAction Stop
+
+            $action = New-ScheduledTaskAction -Execute $Executable -Argument $argumentsString
+            $principal = New-ScheduledTaskPrincipal -UserId $Credential.UserName -LogonType Password -RunLevel Highest
+            $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -StartWhenAvailable -Compatibility Win8
+            $definition = New-ScheduledTask -Action $action -Principal $principal -Settings $settings
+
+            Register-ScheduledTask -TaskName $taskName -InputObject $definition -User $Credential.UserName -Password $Credential.GetNetworkCredential().Password -Force | Out-Null
+            Start-ScheduledTask -TaskName $taskName
+            Write-Log -Message "Temporary scheduled task $taskName started for elevation."
+        }
+        catch {
+            $taskCleanup.Invoke($taskName)
+            Write-Log -Message "Failed to restart script using scheduled task: $($_.Exception.Message)" -Level 'ERROR'
+            throw
+        }
+
+        Start-Sleep -Seconds 5
+        Write-Log -Message "Cleaning up temporary scheduled task $taskName."
+        $taskCleanup.Invoke($taskName)
     }
     else {
         $startProcessSplat['UseNewEnvironment'] = $true
         if ($Elevated) {
             $startProcessSplat['Verb'] = 'RunAs'
         }
-    }
 
-    Write-Log -Message "Launching new PowerShell instance: $Executable"
-    try {
-        Start-Process @startProcessSplat | Out-Null
-    }
-    catch {
-        Write-Log -Message "Failed to restart script: $($_.Exception.Message)" -Level 'ERROR'
-        throw
+        Write-Log -Message "Launching new PowerShell instance: $Executable"
+        try {
+            Start-Process @startProcessSplat | Out-Null
+        }
+        catch {
+            Write-Log -Message "Failed to restart script: $($_.Exception.Message)" -Level 'ERROR'
+            throw
+        }
     }
 
     Write-Log -Message 'Restart initiated. Exiting current process.'
@@ -300,7 +363,24 @@ function Invoke-CommandWithLogging {
     try {
         $output = Invoke-Expression $Command
         if ($output) {
-            $output | ForEach-Object { Write-Log -Message $_ }
+            foreach ($item in $output) {
+                if ($null -eq $item) {
+                    continue
+                }
+
+                $text = if ($item -is [string]) { $item } else { ($item | Out-String) }
+                if ([string]::IsNullOrWhiteSpace($text)) {
+                    continue
+                }
+
+                $lines = $text -split "`r?`n"
+                foreach ($line in $lines) {
+                    $trimmed = $line.TrimEnd()
+                    if (-not [string]::IsNullOrWhiteSpace($trimmed)) {
+                        Write-Log -Message $trimmed
+                    }
+                }
+            }
         }
         if ($SuccessMessage) {
             Write-Log -Message $SuccessMessage
