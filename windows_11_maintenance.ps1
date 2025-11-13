@@ -15,7 +15,8 @@ param(
     [switch]$SkipDiskCleanup,
     [switch]$SkipStorageSense,
     [switch]$SkipDefrag,
-    [switch]$SkipAppUpdates
+    [switch]$SkipAppUpdates,
+    [switch]$AutoElevationAttempt
 )
 
 Set-StrictMode -Version Latest
@@ -177,10 +178,21 @@ function Ensure-Administrator {
         return
     }
 
+    if ($AutoElevationAttempt) {
+        Write-Log -Message 'Administrative privileges could not be confirmed after automatic elevation attempt. Verify stored credentials or launch from an elevated session.' -Level 'ERROR'
+        throw 'Administrative privileges required.'
+    }
+
     $storedCredential = Get-StoredAdminCredential
     if ($storedCredential) {
         Write-Log -Message 'Administrative privileges required. Relaunching with stored credentials.'
         $arguments = Get-InvocationArguments -BoundParameters $script:InitialBoundParameters -UnboundArguments $script:InitialUnboundArguments
+        if (-not $arguments) {
+            $arguments = @()
+        }
+        if (-not ($arguments -contains '-AutoElevationAttempt')) {
+            $arguments += '-AutoElevationAttempt'
+        }
         Restart-ScriptProcess -Executable $script:CurrentPowerShellPath -Credential $storedCredential -ScriptArguments $arguments
     }
 
