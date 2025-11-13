@@ -187,7 +187,7 @@ function Restart-ScriptProcess {
                 }
             }
             catch {
-                Write-Log -Message "Failed to remove temporary scheduled task $Name: $($_.Exception.Message)" -Level 'WARN'
+                Write-Log -Message "Failed to remove temporary scheduled task ${Name}: $($_.Exception.Message)" -Level 'WARN'
             }
         }
 
