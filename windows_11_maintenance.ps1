@@ -412,7 +412,7 @@ function Initialize-DiskCleanupProfile {
                 New-ItemProperty -Path $keyPath -Name $flagName -PropertyType DWord -Value 2 -Force | Out-Null
             }
             catch {
-                Write-Log -Message "Unable to set Disk Cleanup flag for $category: $($_.Exception.Message)" -Level 'WARN'
+                Write-Log -Message "Unable to set Disk Cleanup flag for ${category}: $($_.Exception.Message)" -Level 'WARN'
             }
         }
     }
