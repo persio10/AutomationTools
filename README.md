@@ -83,9 +83,15 @@ Run the script at your own risk. Always test within a controlled environment bef
 ## LanScope features
 
 - Auto-detects the active local subnet (/24 by default) and lets you override with any CIDR.
+ codex/create-advanced-ip-scanner-for-windows-11-hfmjnp
 - Fast, concurrent ping sweep with latency capture plus layered hostname resolution (reverse DNS, `ping -a`, and NetBIOS on Windows for better device labeling).
 - Windows-friendly ARP lookup for MAC addresses after each successful ping.
 - Expanded open-port detection against a richer set of common service ports, with human-friendly service hints alongside the raw port list.
+=======
+- Fast, concurrent ping sweep with latency capture and hostname resolution.
+- Windows-friendly ARP lookup for MAC addresses after each successful ping.
+- Lightweight open-port detection against common service ports (SSH, HTTP/S, SMB, RDP, SQL, etc.).
+
 - Live progress updates, start/stop controls, and export to CSV.
 - Modern, clean UI built on Tkinter/ttk for easy operation.
 
