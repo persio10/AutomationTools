@@ -19,20 +19,93 @@ COMMON_PORTS = [
     53,
     80,
     110,
+    123,
+    135,
+    137,
     139,
     143,
+    161,
     389,
     443,
     445,
     465,
+    514,
     587,
+    631,
+    853,
+    873,
     993,
     995,
     1433,
+    1723,
+    2049,
+    2181,
+    2375,
+    2377,
     3306,
     3389,
+    4444,
+    4789,
+    5050,
+    5353,
     5357,
+    5672,
+    5900,
+    6379,
+    6443,
+    8000,
+    8080,
+    8443,
+    9000,
 ]
+
+SERVICE_NAMES = {
+    21: "FTP",
+    22: "SSH",
+    23: "Telnet",
+    25: "SMTP",
+    53: "DNS",
+    80: "HTTP",
+    110: "POP3",
+    123: "NTP",
+    135: "RPC",
+    137: "NetBIOS",
+    139: "SMB",
+    143: "IMAP",
+    161: "SNMP",
+    389: "LDAP",
+    443: "HTTPS",
+    445: "SMB",
+    465: "SMTPS",
+    514: "Syslog",
+    587: "SMTPS",
+    631: "IPP",
+    853: "DoT",
+    873: "rsync",
+    993: "IMAPS",
+    995: "POP3S",
+    1433: "MSSQL",
+    1723: "PPTP",
+    2049: "NFS",
+    2181: "Zookeeper",
+    2375: "Docker",
+    2377: "Docker",
+    3306: "MySQL",
+    3389: "RDP",
+    4444: "Metasploit",
+    4789: "VXLAN",
+    5050: "Mesos",
+    5353: "mDNS",
+    5357: "WSD",
+    5672: "AMQP",
+    5900: "VNC",
+    6379: "Redis",
+    6443: "K8s API",
+    8000: "Dev HTTP",
+    8080: "HTTP-Alt",
+    8443: "HTTPS-Alt",
+    9000: "App/API",
+}
 
 
 class DeviceRecord:
@@ -41,6 +114,7 @@ class DeviceRecord:
         self.hostname = ""
         self.mac_address = ""
         self.ports = []
+        self.service_hints = ""
         self.latency_ms: float | None = None
 
     @property
@@ -49,20 +123,23 @@ class DeviceRecord:
             return ""
         return ", ".join(str(p) for p in sorted(self.ports))
 
-    def as_row(self) -> tuple[str, str, str, str, str]:
+    def as_row(self) -> tuple[str, str, str, str, str, str]:
         latency = f"{self.latency_ms:.0f} ms" if self.latency_ms is not None else ""
-        return self.ip, self.hostname, self.mac_address, latency, self.port_summary
+        return self.ip, self.hostname, self.mac_address, latency, self.port_summary, self.service_hints
 
 
 class AsyncScanner:
-    def __init__(self, network: ipaddress.IPv4Network, semaphore: int = 256):
+    def __init__(self, network: ipaddress.IPv4Network, semaphore: int = 256, stop_event: threading.Event | None = None):
         self.network = network
         self.semaphore = asyncio.Semaphore(semaphore)
+        self.stop_event = stop_event
         self._loop = asyncio.get_event_loop()
 
     async def run(self, progress_cb):
         tasks = []
         for ip in self.network.hosts():
+            if self.stop_event and self.stop_event.is_set():
+                break
             tasks.append(asyncio.create_task(self._probe_host(str(ip), progress_cb)))
         if not tasks:
             return
@@ -70,15 +147,18 @@ class AsyncScanner:
 
     async def _probe_host(self, ip: str, progress_cb):
         async with self.semaphore:
+            if self.stop_event and self.stop_event.is_set():
+                return
             alive, latency = await self._ping(ip)
             progress_cb("ping", ip)
-            if not alive:
+            if not alive or (self.stop_event and self.stop_event.is_set()):
                 return
             record = DeviceRecord(ip)
             record.latency_ms = latency
             record.hostname = await self._resolve_hostname(ip)
             record.mac_address = await self._get_mac_address(ip)
             record.ports = await self._scan_ports(ip)
+            record.service_hints = self._service_hints(record.ports)
             progress_cb("found", record)
 
     async def _ping(self, ip: str) -> tuple[bool, float | None]:
@@ -95,13 +175,58 @@ class AsyncScanner:
 
     async def _resolve_hostname(self, ip: str) -> str:
         loop = asyncio.get_event_loop()
+        resolvers = [
+            lambda: self._reverse_dns(ip),
+            lambda: self._ping_for_hostname(ip) if os.name == "nt" else "",
+            lambda: self._nbtstat_lookup(ip) if os.name == "nt" else "",
+        ]
+        for resolver in resolvers:
+            try:
+                name = await loop.run_in_executor(None, resolver)
+                if name:
+                    return name
+            except Exception:
+                continue
+        return ""
+
+    @staticmethod
+    def _reverse_dns(ip: str) -> str:
         try:
-            result = await loop.run_in_executor(None, socket.gethostbyaddr, ip)
+            result = socket.gethostbyaddr(ip)
             if isinstance(result, tuple) and result:
                 return result[0]
-            return ""
         except Exception:
             return ""
+        return ""
+
+    @staticmethod
+    def _ping_for_hostname(ip: str) -> str:
+        # Windows ping -a attempts to resolve hostnames without needing DNS records.
+        proc = subprocess.run(
+            ["ping", "-a", "-n", "1", "-w", "400", ip], capture_output=True, text=True, check=False
+        )
+        for line in proc.stdout.splitlines():
+            if "Pinging" in line and "[" in line and "]" in line:
+                try:
+                    left = line.split("Pinging", 1)[1].strip()
+                    hostname = left.split(" [", 1)[0].strip()
+                    if hostname and hostname != ip:
+                        return hostname
+                except Exception:
+                    continue
+        return ""
+
+    @staticmethod
+    def _nbtstat_lookup(ip: str) -> str:
+        proc = subprocess.run(["nbtstat", "-A", ip], capture_output=True, text=True, check=False)
+        for line in proc.stdout.splitlines():
+            if "<00>" in line and "UNIQUE" in line:
+                parts = line.split()
+                if parts:
+                    candidate = parts[0].strip()
+                    if candidate and candidate != "<unknown>":
+                        return candidate
+        return ""
 
     async def _get_mac_address(self, ip: str) -> str:
         # Windows-friendly ARP lookup after a ping.
@@ -126,7 +251,6 @@ class AsyncScanner:
 
     async def _scan_ports(self, ip: str) -> list[int]:
         open_ports: list[int] = []
-        loop = asyncio.get_event_loop()
         tasks = [self._try_connect(ip, port) for port in COMMON_PORTS]
         results = await asyncio.gather(*tasks)
         for port, is_open in zip(COMMON_PORTS, results):
@@ -142,6 +266,18 @@ class AsyncScanner:
             return True
         except Exception:
             return False
+
+    @staticmethod
+    def _service_hints(open_ports: list[int]) -> str:
+        if not open_ports:
+            return ""
+        hints = []
+        for port in sorted(open_ports):
+            if port in SERVICE_NAMES:
+                hints.append(f"{port}:{SERVICE_NAMES[port]}")
+            else:
+                hints.append(str(port))
+        return ", ".join(hints)
 
 
 def detect_default_network(default_prefix: int = 24) -> str:
@@ -223,14 +359,15 @@ class ScannerApp(tk.Tk):
         frame = tk.Frame(self, bg="#0f172a")
         frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
 
-        columns = ("ip", "hostname", "mac", "latency", "ports")
+        columns = ("ip", "hostname", "mac", "latency", "ports", "services")
         self.tree = ttk.Treeview(frame, columns=columns, show="headings", height=18)
         headings = [
             ("ip", "IP Address", 150),
             ("hostname", "Hostname", 200),
             ("mac", "MAC Address", 160),
             ("latency", "Latency", 90),
-            ("ports", "Open Ports", 220),
+            ("ports", "Open Ports", 160),
+            ("services", "Service Hints", 230),
         ]
         for col, text, width in headings:
             self.tree.heading(col, text=text)
@@ -286,7 +423,7 @@ class ScannerApp(tk.Tk):
         self.status_var.set("Stopping...")
 
     async def _scan_network(self, network: ipaddress.IPv4Network):
-        scanner = AsyncScanner(network, semaphore=self.concurrency_var.get())
+        scanner = AsyncScanner(network, semaphore=self.concurrency_var.get(), stop_event=self.stop_event)
 
         def progress_cb(event_type, payload):
             if self.stop_event.is_set():
@@ -316,7 +453,7 @@ class ScannerApp(tk.Tk):
         self._update_summary()
 
     def _finish_scan(self):
-        self.status_var.set("Completed")
+        self.status_var.set("Stopped" if self.stop_event.is_set() else "Completed")
         self.export_button.config(state=tk.NORMAL if self.records else tk.DISABLED)
         self.start_button.config(state=tk.NORMAL)
         self.stop_button.config(state=tk.DISABLED)
@@ -335,7 +472,9 @@ class ScannerApp(tk.Tk):
             return
         with open(filename, "w", newline="", encoding="utf-8") as csvfile:
             writer = csv.writer(csvfile)
-            writer.writerow(["IP Address", "Hostname", "MAC Address", "Latency", "Open Ports"])
+            writer.writerow(
+                ["IP Address", "Hostname", "MAC Address", "Latency", "Open Ports", "Service Hints"]
+            )
             for record in self.records.values():
                 writer.writerow(record.as_row())
         messagebox.showinfo("Exported", f"Saved {len(self.records)} devices to {filename}")
