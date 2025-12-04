@@ -73,3 +73,46 @@ Old logs older than 30 days are pruned automatically each run.
 ## Disclaimer
 
 Run the script at your own risk. Always test within a controlled environment before rolling out widely, and ensure that you have verified backups of critical data.
+
+---
+
+# LanScope – Advanced IP Scanner (Windows 11)
+
+`ip_scanner/app.py` is a Python/Tkinter desktop app for scanning your local network and tracking devices in your homelab. It is designed to build cleanly into a Windows 11 25H2 executable with PyInstaller.
+
+## LanScope features
+
+- Auto-detects the active local subnet (/24 by default) and lets you override with any CIDR.
+- Fast, concurrent ping sweep with latency capture plus layered hostname resolution (reverse DNS, `ping -a`, and NetBIOS on Windows for better device labeling).
+- TTL parsing, OS guesswork, and MAC-to-vendor mapping to quickly separate Windows, Linux/Unix, network gear, cloud hypervisors, and Bonjour/Apple devices.
+- Windows-friendly ARP lookup for MAC addresses after each successful ping.
+- Expanded open-port detection against a broader catalog (databases, hypervisors, VPNs, embedded/IoT) with service hints plus optional **deep fingerprinting** (banner grabs on HTTP/SSH/SMB/RDP/WinRM and more).
+- Identity hints derived from ports, hostnames, TTL, vendor, and captured banners for razor-fast device recognition.
+- Custom port overrides so you can probe homelab-only services without editing code.
+- Insight cards showing device counts, fastest responders, and top-seen services during the run.
+- Live progress updates, elapsed-time tracking, start/stop controls, global text filter, context-menu copy/details, and export to CSV (including fingerprints and vendors).
+- Modern, sleek dark UI built on Tkinter/ttk with alternating row colors and accent buttons.
+
+## Run the scanner (Python)
+
+```powershell
+python -m pip install --upgrade pip
+python -m pip install pyinstaller
+python ip_scanner/app.py
+```
+
+If you want to adjust the default scan range, set the Network/CIDR field (e.g., `10.0.0.0/24`) before clicking **Start Scan**.
+
+## Build a Windows 11 executable
+
+From a Windows 11 25H2 host with Python 3.11+ installed:
+
+```powershell
+python -m pip install --upgrade pip
+python -m pip install pyinstaller
+pyinstaller --noconfirm --windowed --name LanScope ip_scanner/app.py
+```
+
+The executable and supporting files will be placed in `dist\LanScope\`. You can copy that folder anywhere on your Windows machine and run `LanScope.exe` directly.
+
+> Tip: include the `ip_scanner` folder when building so icons and future assets can be bundled easily.
