@@ -17,6 +17,8 @@ COMMON_PORTS = [
     23,
     25,
     53,
+    67,
+    68,
     80,
     110,
     123,
@@ -29,7 +31,11 @@ COMMON_PORTS = [
     443,
     445,
     465,
+    500,
     514,
+    515,
+    548,
+    554,
     587,
     631,
     853,
@@ -42,10 +48,16 @@ COMMON_PORTS = [
     2181,
     2375,
     2377,
+    2483,
+    3000,
+    32400,
     3306,
     3389,
+    3689,
     4444,
     4789,
+    5000,
+    5001,
     5050,
     5353,
     5357,
@@ -55,8 +67,16 @@ COMMON_PORTS = [
     6443,
     8000,
     8080,
+    8200,
     8443,
+    8500,
+    8529,
+    8530,
+    8888,
     9000,
+    9100,
+    9443,
+    10000,
 ]
 
 SERVICE_NAMES = {
@@ -65,6 +85,8 @@ SERVICE_NAMES = {
     23: "Telnet",
     25: "SMTP",
     53: "DNS",
+    67: "DHCP",
+    68: "DHCP",
     80: "HTTP",
     110: "POP3",
     123: "NTP",
@@ -77,7 +99,11 @@ SERVICE_NAMES = {
     443: "HTTPS",
     445: "SMB",
     465: "SMTPS",
+    500: "IPSec",
     514: "Syslog",
+    515: "LPD",
+    548: "AFP",
+    554: "RTSP",
     587: "SMTPS",
     631: "IPP",
     853: "DoT",
@@ -90,10 +116,16 @@ SERVICE_NAMES = {
     2181: "Zookeeper",
     2375: "Docker",
     2377: "Docker",
+    2483: "Oracle DB",
+    3000: "Node/Dev",
+    32400: "Plex",
     3306: "MySQL",
     3389: "RDP",
+    3689: "DAAP",
     4444: "Metasploit",
     4789: "VXLAN",
+    5000: "UPnP/Dev",
+    5001: "Synology/HTTPS",
     5050: "Mesos",
     5353: "mDNS",
     5357: "WSD",
@@ -103,8 +135,16 @@ SERVICE_NAMES = {
     6443: "K8s API",
     8000: "Dev HTTP",
     8080: "HTTP-Alt",
+    8200: "DLNA/UPnP",
     8443: "HTTPS-Alt",
+    8500: "Consul",
+    8529: "Emby",
+    8530: "Emby",
+    8888: "Alt HTTPS",
     9000: "App/API",
+    9100: "JetDirect",
+    9443: "Alt HTTPS",
+    10000: "Webmin",
 }
 
 
@@ -112,7 +152,10 @@ class DeviceRecord:
     def __init__(self, ip: str):
         self.ip = ip
         self.hostname = ""
+        self.os_guess = ""
         self.mac_address = ""
+        self.ttl: int | None = None
+        self.identity_hint = ""
         self.ports = []
         self.service_hints = ""
         self.latency_ms: float | None = None
@@ -123,9 +166,20 @@ class DeviceRecord:
             return ""
         return ", ".join(str(p) for p in sorted(self.ports))
 
-    def as_row(self) -> tuple[str, str, str, str, str, str]:
+    def as_row(self) -> tuple[str, str, str, str, str, str, str, str]:
         latency = f"{self.latency_ms:.0f} ms" if self.latency_ms is not None else ""
-        return self.ip, self.hostname, self.mac_address, latency, self.port_summary, self.service_hints
+        ttl = str(self.ttl) if self.ttl is not None else ""
+        return (
+            self.ip,
+            self.hostname,
+            self.os_guess,
+            latency,
+            ttl,
+            self.port_summary,
+            self.service_hints,
+            self.identity_hint,
+            self.mac_address,
+        )
 
 
 class AsyncScanner:
@@ -149,29 +203,55 @@ class AsyncScanner:
         async with self.semaphore:
             if self.stop_event and self.stop_event.is_set():
                 return
-            alive, latency = await self._ping(ip)
+            alive, latency, ttl = await self._ping(ip)
             progress_cb("ping", ip)
             if not alive or (self.stop_event and self.stop_event.is_set()):
                 return
             record = DeviceRecord(ip)
             record.latency_ms = latency
+            record.ttl = ttl
             record.hostname = await self._resolve_hostname(ip)
             record.mac_address = await self._get_mac_address(ip)
             record.ports = await self._scan_ports(ip)
             record.service_hints = self._service_hints(record.ports)
+            record.os_guess = self._guess_os(ttl, record.ports, record.hostname)
+            record.identity_hint = self._identity_hint(record)
             progress_cb("found", record)
 
-    async def _ping(self, ip: str) -> tuple[bool, float | None]:
-        flags = ["-n", "1", "-w", "400"] if os.name == "nt" else ["-c", "1", "-W", "1"]
+    async def _ping(self, ip: str) -> tuple[bool, float | None, int | None]:
+        flags = ["-n", "1", "-w", "400"] if os.name == "nt" else ["-c", "1", "-W", "1", "-n"]
         start = time.perf_counter()
         proc = await asyncio.create_subprocess_exec(
-            "ping", *flags, ip, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+            "ping",
+            *flags,
+            ip,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
         )
-        await proc.wait()
+        stdout, _ = await proc.communicate()
         if proc.returncode == 0:
             latency = (time.perf_counter() - start) * 1000.0
-            return True, latency
-        return False, None
+            ttl = self._extract_ttl(stdout.decode(errors="ignore"))
+            return True, latency, ttl
+        return False, None, None
+
+    @staticmethod
+    def _extract_ttl(output: str) -> int | None:
+        for line in output.splitlines():
+            if "ttl" in line.lower():
+                for chunk in line.replace("=", " ").split():
+                    if chunk.isdigit():
+                        value = int(chunk)
+                        if 1 <= value <= 255:
+                            return value
+                if "ttl" in line.lower():
+                    parts = [part for part in line.split() if "ttl" in part.lower()]
+                    for part in parts:
+                        try:
+                            return int(part.lower().split("ttl")[-1].replace("=", ""))
+                        except Exception:
+                            continue
+        return None
 
     async def _resolve_hostname(self, ip: str) -> str:
         loop = asyncio.get_event_loop()
@@ -279,6 +359,57 @@ class AsyncScanner:
                 hints.append(str(port))
         return ", ".join(hints)
 
+    @staticmethod
+    def _guess_os(ttl: int | None, ports: list[int], hostname: str) -> str:
+        if hostname and hostname.lower().endswith(".local"):
+            return "Apple/Bonjour"
+        if ttl is not None:
+            if ttl >= 240:
+                return "Network gear"
+            if ttl >= 128:
+                return "Windows"
+            if ttl >= 100:
+                return "BSD/Network"
+            if ttl >= 60:
+                return "Linux/Unix"
+        if 445 in ports or 3389 in ports:
+            return "Windows"
+        if 22 in ports or 2222 in ports:
+            return "Linux/Unix"
+        if 548 in ports:
+            return "macOS"
+        return ""
+
+    @staticmethod
+    def _identity_hint(record: "DeviceRecord") -> str:
+        hints = []
+        ports = set(record.ports)
+        if record.hostname:
+            hints.append(record.hostname)
+        if 3389 in ports:
+            hints.append("RDP host")
+        if 22 in ports:
+            hints.append("SSH reachable")
+        if 32400 in ports:
+            hints.append("Plex Media Server")
+        if 9100 in ports:
+            hints.append("Printer/JetDirect")
+        if 161 in ports:
+            hints.append("SNMP device")
+        if 5000 in ports or 8200 in ports:
+            hints.append("Media/UPnP")
+        if 445 in ports or 139 in ports:
+            hints.append("SMB fileshare")
+        if record.os_guess:
+            hints.append(record.os_guess)
+        if record.ttl:
+            hints.append(f"TTL {record.ttl}")
+        seen = []
+        for hint in hints:
+            if hint not in seen:
+                seen.append(hint)
+        return " · ".join(seen)
+
 
 def detect_default_network(default_prefix: int = 24) -> str:
     try:
@@ -294,14 +425,19 @@ class ScannerApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("LanScope - Advanced IP Scanner")
-        self.geometry("1050x600")
+        self.geometry("1220x680")
         self.resizable(True, True)
-        self.configure(bg="#0f172a")
+        self.configure(bg="#0b1220")
+
+        self._style()
 
         self.records: dict[str, DeviceRecord] = {}
         self.result_queue: queue.Queue = queue.Queue()
         self.scan_thread: threading.Thread | None = None
         self.stop_event = threading.Event()
+        self.host_count: int | None = None
+        self.start_time: float | None = None
+        self.filter_var = tk.StringVar()
 
         self._build_header()
         self._build_controls()
@@ -310,64 +446,100 @@ class ScannerApp(tk.Tk):
 
         self.after(150, self._drain_queue)
 
+    def _style(self):
+        style = ttk.Style(self)
+        style.theme_use("clam")
+        accent = "#22d3ee"
+        surface = "#111827"
+        style.configure("TLabel", background="#0b1220", foreground="#e2e8f0", font=("Segoe UI", 10))
+        style.configure("Header.TLabel", background=surface, foreground="#e2e8f0", font=("Segoe UI", 18, "bold"))
+        style.configure("Subheader.TLabel", background=surface, foreground="#94a3b8", font=("Segoe UI", 11))
+        style.configure("Card.TFrame", background=surface, relief=tk.FLAT)
+        style.configure("Accent.TButton", padding=6, background=accent, foreground="#0f172a")
+        style.map(
+            "Accent.TButton",
+            background=[("active", "#38e2ff"), ("disabled", "#1e293b")],
+            foreground=[("disabled", "#94a3b8")],
+        )
+        style.configure("Treeview", background="#0f172a", fieldbackground="#0f172a", foreground="#e2e8f0", rowheight=26)
+        style.configure("Treeview.Heading", background=surface, foreground="#e2e8f0", font=("Segoe UI", 10, "bold"))
+        style.map("Treeview", background=[("selected", "#1f2937")])
+
     def _build_header(self):
         header = tk.Frame(self, bg="#111827")
-        header.pack(fill=tk.X, padx=10, pady=(10, 0))
-        title = tk.Label(
-            header,
-            text="LanScope",
-            fg="#22d3ee",
-            bg="#111827",
-            font=("Segoe UI", 18, "bold"),
-        )
+        header.pack(fill=tk.X, padx=12, pady=(12, 4))
+        title = ttk.Label(header, text="LanScope", style="Header.TLabel")
         title.pack(side=tk.LEFT)
-        subtitle = tk.Label(
+        subtitle = ttk.Label(
             header,
             text="Discover and track every device on your network",
-            fg="#cbd5e1",
-            bg="#111827",
-            font=("Segoe UI", 10),
+            style="Subheader.TLabel",
         )
         subtitle.pack(side=tk.LEFT, padx=(10, 0))
 
-    def _build_controls(self):
-        panel = tk.Frame(self, bg="#0f172a")
-        panel.pack(fill=tk.X, padx=10, pady=10)
+        badge = tk.Label(
+            header,
+            text="Live homelab insights",
+            fg="#0b1220",
+            bg="#22d3ee",
+            padx=10,
+            pady=4,
+            font=("Segoe UI", 9, "bold"),
+        )
+        badge.pack(side=tk.RIGHT)
 
-        ttk.Label(panel, text="Network / CIDR:").pack(side=tk.LEFT, padx=(0, 5))
+    def _build_controls(self):
+        panel = tk.Frame(self, bg="#0b1220")
+        panel.pack(fill=tk.X, padx=12, pady=10)
+
+        left = tk.Frame(panel, bg="#0b1220")
+        left.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Label(left, text="Network / CIDR:").pack(side=tk.LEFT, padx=(0, 5))
         self.network_var = tk.StringVar(value=detect_default_network())
-        self.network_entry = ttk.Entry(panel, textvariable=self.network_var, width=26)
+        self.network_entry = ttk.Entry(left, textvariable=self.network_var, width=26)
         self.network_entry.pack(side=tk.LEFT)
 
-        ttk.Label(panel, text="Max concurrency:").pack(side=tk.LEFT, padx=(15, 5))
+        ttk.Label(left, text="Max concurrency:").pack(side=tk.LEFT, padx=(15, 5))
         self.concurrency_var = tk.IntVar(value=256)
-        self.concurrency_spin = ttk.Spinbox(panel, textvariable=self.concurrency_var, from_=16, to=1024, width=6)
+        self.concurrency_spin = ttk.Spinbox(
+            left, textvariable=self.concurrency_var, from_=16, to=1024, width=6
+        )
         self.concurrency_spin.pack(side=tk.LEFT)
 
-        self.status_var = tk.StringVar(value="Idle")
-        status_label = ttk.Label(panel, textvariable=self.status_var, width=20)
-        status_label.pack(side=tk.RIGHT)
+        ttk.Label(left, text="Filter:").pack(side=tk.LEFT, padx=(15, 5))
+        self.filter_entry = ttk.Entry(left, textvariable=self.filter_var, width=18)
+        self.filter_entry.pack(side=tk.LEFT)
+        self.filter_var.trace_add("write", lambda *_: self._apply_filter())
 
-        self.stop_button = ttk.Button(panel, text="Stop", command=self.stop_scan, state=tk.DISABLED)
-        self.stop_button.pack(side=tk.RIGHT, padx=(5, 0))
-        self.start_button = ttk.Button(panel, text="Start Scan", command=self.start_scan)
-        self.start_button.pack(side=tk.RIGHT, padx=(5, 0))
-        self.export_button = ttk.Button(panel, text="Export CSV", command=self.export_csv, state=tk.DISABLED)
-        self.export_button.pack(side=tk.RIGHT)
+        right = tk.Frame(panel, bg="#0b1220")
+        right.pack(side=tk.RIGHT)
+        self.status_var = tk.StringVar(value="Idle")
+        status_label = ttk.Label(right, textvariable=self.status_var, width=22)
+        status_label.pack(side=tk.LEFT, padx=(0, 8))
+
+        self.export_button = ttk.Button(right, text="Export CSV", command=self.export_csv, state=tk.DISABLED)
+        self.export_button.pack(side=tk.LEFT, padx=(0, 5))
+        self.stop_button = ttk.Button(right, text="Stop", command=self.stop_scan, state=tk.DISABLED, style="Accent.TButton")
+        self.stop_button.pack(side=tk.LEFT, padx=(0, 5))
+        self.start_button = ttk.Button(right, text="Start Scan", command=self.start_scan, style="Accent.TButton")
+        self.start_button.pack(side=tk.LEFT)
 
     def _build_table(self):
-        frame = tk.Frame(self, bg="#0f172a")
-        frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+        frame = tk.Frame(self, bg="#0b1220")
+        frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 10))
 
-        columns = ("ip", "hostname", "mac", "latency", "ports", "services")
-        self.tree = ttk.Treeview(frame, columns=columns, show="headings", height=18)
+        columns = ("ip", "hostname", "os", "latency", "ttl", "ports", "services", "identity", "mac")
+        self.tree = ttk.Treeview(frame, columns=columns, show="headings", height=20)
         headings = [
-            ("ip", "IP Address", 150),
+            ("ip", "IP Address", 140),
             ("hostname", "Hostname", 200),
+            ("os", "OS Hint", 120),
+            ("latency", "Latency", 80),
+            ("ttl", "TTL", 60),
+            ("ports", "Open Ports", 150),
+            ("services", "Service Hints", 220),
+            ("identity", "Identity Hints", 240),
             ("mac", "MAC Address", 160),
-            ("latency", "Latency", 90),
-            ("ports", "Open Ports", 160),
-            ("services", "Service Hints", 230),
         ]
         for col, text, width in headings:
             self.tree.heading(col, text=text)
@@ -384,12 +556,21 @@ class ScannerApp(tk.Tk):
         frame.rowconfigure(0, weight=1)
         frame.columnconfigure(0, weight=1)
 
+        self.tree.tag_configure("even", background="#0c182e")
+        self.tree.tag_configure("odd", background="#10203a")
+
     def _build_footer(self):
-        footer = tk.Frame(self, bg="#0f172a")
-        footer.pack(fill=tk.X, padx=10, pady=(0, 12))
+        footer = tk.Frame(self, bg="#0b1220")
+        footer.pack(fill=tk.X, padx=12, pady=(0, 12))
 
         self.summary_var = tk.StringVar(value="Devices: 0 | Online: 0")
         ttk.Label(footer, textvariable=self.summary_var).pack(side=tk.LEFT)
+
+        self.elapsed_var = tk.StringVar(value="Elapsed: 0.0s")
+        ttk.Label(footer, textvariable=self.elapsed_var).pack(side=tk.LEFT, padx=(15, 0))
+
+        self.progress = ttk.Progressbar(footer, length=240, mode="indeterminate")
+        self.progress.pack(side=tk.RIGHT)
 
     def start_scan(self):
         if self.scan_thread and self.scan_thread.is_alive():
@@ -404,12 +585,16 @@ class ScannerApp(tk.Tk):
         self.records.clear()
         for item in self.tree.get_children():
             self.tree.delete(item)
+        self.host_count = network.num_addresses - 2 if network.prefixlen <= 30 else max(1, network.num_addresses)
+        self.start_time = time.time()
         self.status_var.set("Scanning...")
         self.summary_var.set("Devices: 0 | Online: 0")
+        self.elapsed_var.set("Elapsed: 0.0s")
         self.stop_event.clear()
         self.export_button.config(state=tk.DISABLED)
         self.start_button.config(state=tk.DISABLED)
         self.stop_button.config(state=tk.NORMAL)
+        self.progress.start(12)
 
         def runner():
             asyncio.run(self._scan_network(network))
@@ -421,6 +606,7 @@ class ScannerApp(tk.Tk):
     def stop_scan(self):
         self.stop_event.set()
         self.status_var.set("Stopping...")
+        self.progress.stop()
 
     async def _scan_network(self, network: ipaddress.IPv4Network):
         scanner = AsyncScanner(network, semaphore=self.concurrency_var.get(), stop_event=self.stop_event)
@@ -445,11 +631,13 @@ class ScannerApp(tk.Tk):
         except queue.Empty:
             pass
         finally:
+            if self.start_time and not self.stop_event.is_set():
+                self.elapsed_var.set(f"Elapsed: {time.time() - self.start_time:.1f}s")
             self.after(150, self._drain_queue)
 
     def _add_record(self, record: DeviceRecord):
         self.records[record.ip] = record
-        self.tree.insert("", tk.END, values=record.as_row())
+        self._insert_record(record)
         self._update_summary()
 
     def _finish_scan(self):
@@ -457,9 +645,29 @@ class ScannerApp(tk.Tk):
         self.export_button.config(state=tk.NORMAL if self.records else tk.DISABLED)
         self.start_button.config(state=tk.NORMAL)
         self.stop_button.config(state=tk.DISABLED)
+        self.progress.stop()
+        if self.start_time:
+            self.elapsed_var.set(f"Elapsed: {time.time() - self.start_time:.1f}s")
 
     def _update_summary(self):
-        self.summary_var.set(f"Devices scanned: {len(self.records)} | Online: {len(self.records)}")
+        count = len(self.records)
+        scanned_text = f"Devices found: {count}"
+        if self.host_count:
+            scanned_text += f" / {self.host_count}"
+        self.summary_var.set(scanned_text)
+
+    def _insert_record(self, record: DeviceRecord):
+        filter_text = self.filter_var.get().strip().lower()
+        values_text = " ".join(record.as_row()).lower()
+        if filter_text and filter_text not in values_text:
+            return
+        tag = "even" if len(self.tree.get_children()) % 2 == 0 else "odd"
+        self.tree.insert("", tk.END, values=record.as_row(), tags=(tag,))
+
+    def _apply_filter(self):
+        self.tree.delete(*self.tree.get_children())
+        for record in self.records.values():
+            self._insert_record(record)
 
     def export_csv(self):
         if not self.records:
@@ -473,7 +681,17 @@ class ScannerApp(tk.Tk):
         with open(filename, "w", newline="", encoding="utf-8") as csvfile:
             writer = csv.writer(csvfile)
             writer.writerow(
-                ["IP Address", "Hostname", "MAC Address", "Latency", "Open Ports", "Service Hints"]
+                [
+                    "IP Address",
+                    "Hostname",
+                    "OS Hint",
+                    "Latency",
+                    "TTL",
+                    "Open Ports",
+                    "Service Hints",
+                    "Identity Hints",
+                    "MAC Address",
+                ]
             )
             for record in self.records.values():
                 writer.writerow(record.as_row())
