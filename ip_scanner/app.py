@@ -785,7 +785,7 @@ def discover_wifi_networks() -> list[dict[str, str]]:
                 )
         else:
             proc = subprocess.run(
-                ["nmcli", "-t", "-f", "BSSID,SSID,SECURITY,SIGNAL", "dev", "wifi"],
+                ["nmcli", "-t", "-f", "SSID,SECURITY,SIGNAL", "dev", "wifi"],
                 capture_output=True,
                 text=True,
                 check=False,
@@ -794,16 +794,14 @@ def discover_wifi_networks() -> list[dict[str, str]]:
                 parts = line.split(":")
                 if not parts:
                     continue
-                bssid = parts[0]
-                ssid = parts[1] if len(parts) > 1 else ""
-                security = parts[2] if len(parts) > 2 else ""
-                signal = parts[3] if len(parts) > 3 else ""
+                ssid = parts[0]
+                security = parts[1] if len(parts) > 1 else ""
+                signal = parts[2] if len(parts) > 2 else ""
                 networks.append(
                     {
                         "ssid": ssid or "<hidden>",
                         "security": security or "Unknown",
                         "signal": signal,
-                        "bssid": bssid,
                         "active": bool(ssid == current),
                     }
                 )
@@ -856,65 +854,6 @@ def wifi_port_scan(host: str, ports: list[int] | None = None) -> list[tuple[int,
         except Exception:
             continue
     return findings
-
-
-COMMON_GATEWAY_GUESSES = [
-    "192.168.0.1",
-    "192.168.1.1",
-    "192.168.50.1",
-    "192.168.10.1",
-    "192.168.100.1",
-    "10.0.0.1",
-    "10.1.1.1",
-]
-
-VENDOR_GATEWAY_HINTS = {
-    "UBIQUITI": ["192.168.1.1", "192.168.2.1"],
-    "TP-LINK": ["192.168.0.1", "192.168.1.1"],
-    "NETGEAR": ["192.168.1.1"],
-    "CISCO": ["192.168.1.1", "192.168.0.1"],
-    "LINKSYS": ["192.168.1.1"],
-    "MERCUSYS": ["192.168.1.1"],
-    "ASUSTEK": ["192.168.50.1", "192.168.1.1"],
-}
-
-
-def _gateway_candidates_from_bssid(bssid: str) -> list[str]:
-    candidates = list(COMMON_GATEWAY_GUESSES)
-    if bssid and ":" in bssid:
-        prefix = ":".join(bssid.upper().split(":")[:3])
-        for vendor, options in VENDOR_GATEWAY_HINTS.items():
-            if vendor in prefix:
-                candidates = options + candidates
-                break
-    seen = set()
-    ordered = []
-    for ip in candidates:
-        if ip not in seen:
-            ordered.append(ip)
-            seen.add(ip)
-    return ordered
-
-
-def passive_wifi_port_peek(networks: list[dict[str, str]], ports: list[int] | None = None):
-    """Best-effort port peeks using gateway guesses without associating to SSIDs."""
-
-    results: dict[str, dict[str, object]] = {}
-    for net in networks:
-        ssid = net.get("ssid") or "<hidden>"
-        if net.get("active"):
-            continue
-
-        found_ports: list[tuple[int, str]] = []
-        chosen_host = ""
-        for candidate in _gateway_candidates_from_bssid(net.get("bssid", "")):
-            found_ports = wifi_port_scan(candidate, ports=ports or QUICK_WIFI_PORTS)
-            if found_ports:
-                chosen_host = candidate
-                break
-
-        results[ssid] = {"host": chosen_host or None, "ports": found_ports}
-    return results
 
 
 class ScannerApp(tk.Tk):
@@ -1132,8 +1071,7 @@ class ScannerApp(tk.Tk):
             networks = discover_wifi_networks()
             gateways = _default_gateways()
             gateway_ports = {gw: wifi_port_scan(gw) for gw in gateways}
-            passive_ports = passive_wifi_port_peek(networks)
-            self.result_queue.put(("wifi_done", (networks, gateways, gateway_ports, passive_ports)))
+            self.result_queue.put(("wifi_done", (networks, gateways, gateway_ports)))
 
         self.wifi_thread = threading.Thread(target=worker, daemon=True)
         self.wifi_thread.start()
@@ -1215,12 +1153,8 @@ class ScannerApp(tk.Tk):
                 elif event == "done":
                     self._finish_scan()
                 elif event == "wifi_done":
-                    if len(payload) == 4:
-                        networks, gateways, gateway_ports, passive_ports = payload
-                    else:
-                        networks, gateways, gateway_ports = payload
-                        passive_ports = {}
-                    self._present_wifi_results(networks, gateways, gateway_ports, passive_ports)
+                    networks, gateways, gateway_ports = payload
+                    self._present_wifi_results(networks, gateways, gateway_ports)
         except queue.Empty:
             pass
         finally:
@@ -1242,7 +1176,7 @@ class ScannerApp(tk.Tk):
         if self.start_time:
             self.elapsed_var.set(f"Elapsed: {time.time() - self.start_time:.1f}s")
 
-    def _present_wifi_results(self, networks, gateways, gateway_ports, passive_ports):
+    def _present_wifi_results(self, networks, gateways, gateway_ports):
         self.progress.stop()
         self.status_var.set("Wi-Fi sweep done")
         self.wifi_button.config(state=tk.NORMAL)
@@ -1270,7 +1204,7 @@ class ScannerApp(tk.Tk):
             ("ssid", "SSID", 220),
             ("signal", "Signal", 90),
             ("security", "Security", 140),
-            ("ports", "Open ports on gateway", 280),
+            ("ports", "Open ports on gateway", 240),
         ]
         for col, text, width in headings:
             tree.heading(col, text=text)
@@ -1284,26 +1218,20 @@ class ScannerApp(tk.Tk):
         frame.columnconfigure(0, weight=1)
 
         active_gateway = gateways[0] if gateways else ""
-        default_ports_text = self._format_port_list(gateway_ports.get(active_gateway, [])) if active_gateway else "-"
+        ports_text = self._format_port_list(gateway_ports.get(active_gateway, [])) if active_gateway else "-"
 
         for net in networks:
             ssid = net.get("ssid", "<hidden>")
             signal = net.get("signal", "")
             security = net.get("security", "Unknown")
-            ports_text = default_ports_text
             if net.get("active"):
                 label = ports_text if ports_text else "None (gateway reachable)"
             else:
-                passive = passive_ports.get(ssid, {}) if isinstance(passive_ports, dict) else {}
-                host = passive.get("host")
-                if passive.get("ports"):
-                    label = f"{host}: {self._format_port_list(passive.get('ports'))}"
-                else:
-                    label = "No response to quick peek"
+                label = "Connect to scan ports" if active_gateway else "Unavailable while offline"
             tree.insert("", tk.END, values=(ssid, signal, security, label))
 
         if not networks:
-            tree.insert("", tk.END, values=("-", "-", "-", default_ports_text or "No gateways"))
+            tree.insert("", tk.END, values=("-", "-", "-", ports_text or "No gateways"))
 
         if gateways:
             gateway_frame = tk.Frame(window, bg="#0b1220")
