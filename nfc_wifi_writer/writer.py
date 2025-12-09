@@ -5,7 +5,7 @@ Usage example:
 """
 
 import argparse
-import importlib
+from importlib import import_module, util
 import sys
 
 
@@ -71,19 +71,26 @@ def write_tag(message) -> bool:
     return False
 
 
-def generate_qr(payload: str, output_path: str) -> None:
-    """Generate a QR code image that NFC Tools can import as a Wi-Fi record."""
+def generate_qr(payload: str, output_path: str, qr_module=None) -> None:
+    """Generate a QR code image that NFC Tools can import as a Wi-Fi record.
+
+    The optional ``qr_module`` argument lets tests inject a stand-in object
+    implementing the subset of the ``qrcode`` API that :func:`generate_qr`
+    relies on, so tests can run without external dependencies.
+    """
 
     if not output_path:
         return
 
-    if importlib.util.find_spec("qrcode") is None:
-        raise RuntimeError(
-            "Install the optional 'qrcode[pil]' package to enable QR code generation."
-        )
+    if qr_module is None:
+        if util.find_spec("qrcode") is None:
+            raise RuntimeError(
+                "Install the optional 'qrcode[pil]' package to enable QR code generation."
+            )
 
-    qrcode = importlib.import_module("qrcode")
-    qr = qrcode.QRCode(version=None, box_size=10, border=4)
+        qr_module = import_module("qrcode")
+
+    qr = qr_module.QRCode(version=None, box_size=10, border=4)
     qr.add_data(payload)
     qr.make(fit=True)
     img = qr.make_image(fill_color="black", back_color="white")
