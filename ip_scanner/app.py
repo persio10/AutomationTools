@@ -100,6 +100,8 @@ COMMON_PORTS = [
     11211,
 ]
 
+QUICK_WIFI_PORTS = [80, 443, 8080, 8443, 22, 23, 53, 161, 5000, 8000]
+
 SERVICE_NAMES = {
     21: "FTP",
     22: "SSH",
@@ -598,6 +600,143 @@ def detect_default_network(default_prefix: int = 24) -> str:
         return f"192.168.1.0/{default_prefix}"
 
 
+def _is_valid_ip(ip: str) -> bool:
+    try:
+        ipaddress.ip_address(ip)
+        return True
+    except Exception:
+        return False
+
+
+def _default_gateways() -> list[str]:
+    gateways: list[str] = []
+    try:
+        if os.name == "nt":
+            proc = subprocess.run(["route", "print", "0.0.0.0"], capture_output=True, text=True, check=False)
+            for line in proc.stdout.splitlines():
+                parts = line.split()
+                if len(parts) >= 3 and parts[0] == "0.0.0.0":
+                    gateway = parts[2]
+                    if _is_valid_ip(gateway):
+                        gateways.append(gateway)
+        else:
+            proc = subprocess.run(["ip", "route", "show", "default"], capture_output=True, text=True, check=False)
+            for line in proc.stdout.splitlines():
+                parts = line.split()
+                if "via" in parts:
+                    idx = parts.index("via")
+                    if idx + 1 < len(parts) and _is_valid_ip(parts[idx + 1]):
+                        gateways.append(parts[idx + 1])
+    except Exception:
+        return []
+    return gateways
+
+
+def _current_ssid() -> str:
+    try:
+        if os.name == "nt":
+            proc = subprocess.run(["netsh", "wlan", "show", "interfaces"], capture_output=True, text=True, check=False)
+            for line in proc.stdout.splitlines():
+                if line.strip().startswith("SSID") and ":" in line:
+                    return line.split(":", 1)[1].strip()
+        else:
+            proc = subprocess.run([
+                "nmcli",
+                "-t",
+                "-f",
+                "ACTIVE,SSID",
+                "dev",
+                "wifi",
+            ], capture_output=True, text=True, check=False)
+            for line in proc.stdout.splitlines():
+                parts = line.split(":", 1)
+                if len(parts) == 2 and parts[0].lower() in {"yes", "y"}:
+                    return parts[1]
+    except Exception:
+        return ""
+    return ""
+
+
+def discover_wifi_networks() -> list[dict[str, str]]:
+    networks: list[dict[str, str]] = []
+    current = _current_ssid()
+    try:
+        if os.name == "nt":
+            proc = subprocess.run(
+                ["netsh", "wlan", "show", "networks", "mode=bssid"], capture_output=True, text=True, check=False
+            )
+            ssid = None
+            security = ""
+            signal = ""
+            for line in proc.stdout.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("SSID") and ":" in stripped:
+                    if ssid is not None:
+                        networks.append(
+                            {
+                                "ssid": ssid or "<hidden>",
+                                "security": security or "Unknown",
+                                "signal": signal or "",
+                                "active": bool(ssid == current),
+                            }
+                        )
+                    ssid = stripped.split(":", 1)[1].strip()
+                    security = ""
+                    signal = ""
+                elif stripped.startswith("Authentication") and ":" in stripped:
+                    security = stripped.split(":", 1)[1].strip()
+                elif stripped.startswith("Signal") and ":" in stripped:
+                    signal = stripped.split(":", 1)[1].strip()
+            if ssid is not None:
+                networks.append(
+                    {
+                        "ssid": ssid or "<hidden>",
+                        "security": security or "Unknown",
+                        "signal": signal or "",
+                        "active": bool(ssid == current),
+                    }
+                )
+        else:
+            proc = subprocess.run(
+                ["nmcli", "-t", "-f", "SSID,SECURITY,SIGNAL", "dev", "wifi"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            for line in proc.stdout.splitlines():
+                parts = line.split(":")
+                if not parts:
+                    continue
+                ssid = parts[0]
+                security = parts[1] if len(parts) > 1 else ""
+                signal = parts[2] if len(parts) > 2 else ""
+                networks.append(
+                    {
+                        "ssid": ssid or "<hidden>",
+                        "security": security or "Unknown",
+                        "signal": signal,
+                        "active": bool(ssid == current),
+                    }
+                )
+    except Exception:
+        return []
+    return networks
+
+
+def quick_port_scan(host: str, ports: list[int] | None = None) -> list[int]:
+    target_ports = ports or QUICK_WIFI_PORTS
+    open_ports: list[int] = []
+    for port in target_ports:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(0.4)
+            try:
+                sock.connect((host, port))
+                open_ports.append(port)
+            except Exception:
+                continue
+    return open_ports
+
+
 class ScannerApp(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -611,6 +750,7 @@ class ScannerApp(tk.Tk):
         self.records: dict[str, DeviceRecord] = {}
         self.result_queue: queue.Queue = queue.Queue()
         self.scan_thread: threading.Thread | None = None
+        self.wifi_thread: threading.Thread | None = None
         self.stop_event = threading.Event()
         self.host_count: int | None = None
         self.start_time: float | None = None
@@ -708,6 +848,8 @@ class ScannerApp(tk.Tk):
         self.export_button.pack(side=tk.LEFT, padx=(0, 5))
         self.stop_button = ttk.Button(right, text="Stop", command=self.stop_scan, state=tk.DISABLED, style="Accent.TButton")
         self.stop_button.pack(side=tk.LEFT, padx=(0, 5))
+        self.wifi_button = ttk.Button(right, text="Wi-Fi Sweep", command=self.start_wifi_sweep)
+        self.wifi_button.pack(side=tk.LEFT, padx=(0, 5))
         self.start_button = ttk.Button(right, text="Start Scan", command=self.start_scan, style="Accent.TButton")
         self.start_button.pack(side=tk.LEFT)
 
@@ -797,6 +939,24 @@ class ScannerApp(tk.Tk):
         self.progress = ttk.Progressbar(footer, length=240, mode="indeterminate")
         self.progress.pack(side=tk.RIGHT)
 
+    def start_wifi_sweep(self):
+        if self.wifi_thread and self.wifi_thread.is_alive():
+            return
+        self.status_var.set("Sweeping Wi-Fi…")
+        self.progress.start(12)
+        self.wifi_button.config(state=tk.DISABLED)
+        self.start_button.config(state=tk.DISABLED)
+        self.stop_button.config(state=tk.DISABLED)
+
+        def worker():
+            networks = discover_wifi_networks()
+            gateways = _default_gateways()
+            gateway_ports = {gw: quick_port_scan(gw) for gw in gateways}
+            self.result_queue.put(("wifi_done", (networks, gateways, gateway_ports)))
+
+        self.wifi_thread = threading.Thread(target=worker, daemon=True)
+        self.wifi_thread.start()
+
     def start_scan(self):
         if self.scan_thread and self.scan_thread.is_alive():
             return
@@ -873,6 +1033,9 @@ class ScannerApp(tk.Tk):
                     self.status_var.set(f"Pinging {payload}")
                 elif event == "done":
                     self._finish_scan()
+                elif event == "wifi_done":
+                    networks, gateways, gateway_ports = payload
+                    self._present_wifi_results(networks, gateways, gateway_ports)
         except queue.Empty:
             pass
         finally:
@@ -893,6 +1056,79 @@ class ScannerApp(tk.Tk):
         self.progress.stop()
         if self.start_time:
             self.elapsed_var.set(f"Elapsed: {time.time() - self.start_time:.1f}s")
+
+    def _present_wifi_results(self, networks, gateways, gateway_ports):
+        self.progress.stop()
+        self.status_var.set("Wi-Fi sweep done")
+        self.wifi_button.config(state=tk.NORMAL)
+        self.start_button.config(state=tk.NORMAL)
+        self.stop_button.config(state=tk.DISABLED)
+
+        if not networks and not gateways:
+            messagebox.showinfo("Wi-Fi sweep", "No Wi-Fi data could be collected.")
+            return
+
+        window = tk.Toplevel(self)
+        window.title("Wi-Fi networks")
+        window.configure(bg="#0b1220")
+        window.geometry("720x420")
+
+        header = ttk.Label(window, text="Nearby Wi-Fi & reachable gateways", style="Header.TLabel")
+        header.pack(anchor="w", padx=12, pady=(10, 6))
+
+        frame = tk.Frame(window, bg="#0b1220")
+        frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 10))
+
+        columns = ("ssid", "signal", "security", "ports")
+        tree = ttk.Treeview(frame, columns=columns, show="headings")
+        headings = [
+            ("ssid", "SSID", 220),
+            ("signal", "Signal", 90),
+            ("security", "Security", 140),
+            ("ports", "Open ports on gateway", 240),
+        ]
+        for col, text, width in headings:
+            tree.heading(col, text=text)
+            tree.column(col, width=width, anchor=tk.W)
+
+        vsb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        frame.rowconfigure(0, weight=1)
+        frame.columnconfigure(0, weight=1)
+
+        active_gateway = gateways[0] if gateways else ""
+        ports_text = self._format_port_list(gateway_ports.get(active_gateway, [])) if active_gateway else "-"
+
+        for net in networks:
+            ssid = net.get("ssid", "<hidden>")
+            signal = net.get("signal", "")
+            security = net.get("security", "Unknown")
+            if net.get("active"):
+                label = ports_text if ports_text else "None (gateway reachable)"
+            else:
+                label = "Connect to scan ports" if active_gateway else "Unavailable while offline"
+            tree.insert("", tk.END, values=(ssid, signal, security, label))
+
+        if not networks:
+            tree.insert("", tk.END, values=("-", "-", "-", ports_text or "No gateways"))
+
+        if gateways:
+            gateway_frame = tk.Frame(window, bg="#0b1220")
+            gateway_frame.pack(fill=tk.X, padx=12, pady=(0, 10))
+            details = ", ".join(f"{gw} [{self._format_port_list(gateway_ports.get(gw, [])) or 'closed'}]" for gw in gateways)
+            ttk.Label(gateway_frame, text=f"Reachable gateways: {details}").pack(anchor="w")
+
+    @staticmethod
+    def _format_port_list(ports: list[int]) -> str:
+        if not ports:
+            return ""
+        labels = []
+        for port in sorted(ports):
+            name = SERVICE_NAMES.get(port)
+            labels.append(f"{port} ({name})" if name else str(port))
+        return ", ".join(labels)
 
     def _update_summary(self):
         count = len(self.records)
