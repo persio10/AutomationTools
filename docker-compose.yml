@@ -1,0 +1,20 @@
+version: '3.8'
+services:
+  atlas-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env.example
+    environment:
+      - ATLAS_OPS_SHARED_TOKEN=${ATLAS_OPS_SHARED_TOKEN:-changeme}
+      - ATLAS_OPS_DB_URL=${ATLAS_OPS_DB_URL:-sqlite:////data/atlas_ops.db}
+      - ATLAS_OPS_PORT=${ATLAS_OPS_PORT:-8000}
+    volumes:
+      - atlas_ops_data:/data
+    ports:
+      - "${ATLAS_OPS_PORT:-8000}:8000"
+    command: ["atlas-ops", "serve", "--config", "/data/atlas_ops.config.yaml"]
+
+volumes:
+  atlas_ops_data:

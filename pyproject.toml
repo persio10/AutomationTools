@@ -1,0 +1,20 @@
+[project]
+name = "atlas_ops"
+version = "0.4.0"
+description = "Atlas Ops Copilot"
+authors = [{name = "Atlas Ops"}]
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "sqlalchemy",
+    "pyyaml",
+    "docker",
+]
+
+[project.scripts]
+atlas-ops = "atlas_ops.cli:main"
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"

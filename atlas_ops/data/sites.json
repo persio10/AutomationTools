@@ -1,0 +1,13 @@
+[
+  {
+    "id": "site-homelab",
+    "name": "Homelab HQ",
+    "description": "Core rack with Proxmox + NAS",
+    "networks": {"lan": {"cidr": "192.168.10.0/24", "gateway": "192.168.10.1"}},
+    "integrations": [
+      {"type": "proxmox", "endpoint": "https://pve.local:8006", "status": "healthy", "name": "proxmox-hq"},
+      {"type": "docker", "endpoint": "tcp://192.168.10.30:2375", "status": "warning", "name": "docker-lab"},
+      {"type": "unifi", "endpoint": "https://unifi.local", "status": "degraded"}
+    ]
+  }
+]

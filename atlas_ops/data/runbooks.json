@@ -1,0 +1,110 @@
+[
+  {
+    "id": "rb-proxmox-cluster-health",
+    "title": "Proxmox cluster health triage",
+    "tags": ["proxmox", "virtualization", "ha"],
+    "summary": "Collect quorum state, Ceph/SSD health, and suggest evacuations when nodes flap.",
+    "prompt_template": "Use these steps to summarize Proxmox cluster risk and propose evac priorities.",
+    "steps": [
+      {
+        "title": "Check quorum and corosync latency",
+        "kind": "command",
+        "detail": "pvecm status; corosync-cmapctl | grep rtt",
+        "prompt": "If quorum is lost, suggest which node can be rebooted safely based on HA priority and VM density."
+      },
+      {
+        "title": "Ceph + storage pool health",
+        "kind": "command",
+        "detail": "pveceph status; zpool status",
+        "prompt": "Identify any OSDs near full and recommend rebalancing or evacuation order."
+      },
+      {
+        "title": "VM impact + evacuation plan",
+        "kind": "analysis",
+        "detail": "Summarize VMs on risky nodes and propose a move plan.",
+        "prompt": "Order evacuations to minimize downtime; prefer moving stateless services first."
+      }
+    ]
+  },
+  {
+    "id": "rb-wifi-saturation",
+    "title": "Wi-Fi saturation + gateway congestion",
+    "tags": ["network", "wifi", "gateway"],
+    "summary": "Detect noisy APs, DHCP exhaustion, and gateway overload with guided remediations.",
+    "prompt_template": "Guide the user through mitigating congested Wi-Fi and gateway overload using the steps below.",
+    "steps": [
+      {
+        "title": "Scan BSSIDs and channel overlap",
+        "kind": "command",
+        "detail": "iw dev wlan0 scan | egrep 'SSID|signal|freq'",
+        "prompt": "Highlight overlapping channels and suggest DFS/non-DFS picks per band."
+      },
+      {
+        "title": "Gateway health",
+        "kind": "command",
+        "detail": "ss -tunlp | head; top -b -n1 | head",
+        "prompt": "If CPU >80% or many SYN_RECV sockets on :443/:53, recommend mitigations."
+      },
+      {
+        "title": "DHCP + DNS checks",
+        "kind": "command",
+        "detail": "tail -n 200 /var/log/dhcpd.log; dig +trace example.com",
+        "prompt": "Spot DHCP pool exhaustion or DNS resolution latency and propose fixes."
+      }
+    ]
+  },
+  {
+    "id": "rb-docker-container-down",
+    "title": "Docker container down triage",
+    "tags": ["docker", "container_down"],
+    "summary": "Investigate a stopped container and restore expected state.",
+    "prompt_template": "Use these steps to explain why a container stopped and how to bring it back safely.",
+    "steps": [
+      {
+        "title": "Check container status",
+        "kind": "command",
+        "detail": "docker ps -a --filter name={{container}} --format '{{.Names}} {{.Status}}'",
+        "prompt": "Confirm if the container exited recently and note the exit code."
+      },
+      {
+        "title": "Inspect recent logs",
+        "kind": "command",
+        "detail": "docker logs --tail 50 {{container}}",
+        "prompt": "Summarize the failing message and suggest whether to restart or adjust resources."
+      },
+      {
+        "title": "Restart with guardrails",
+        "kind": "command",
+        "detail": "docker restart {{container}}",
+        "prompt": "If restart loops, advise pausing and checking dependencies or volume mounts."
+      }
+    ]
+  },
+  {
+    "id": "rb-docker-restart-count",
+    "title": "High restart count investigation",
+    "tags": ["docker", "container_restart_count_high"],
+    "summary": "Handle noisy containers that keep restarting.",
+    "prompt_template": "Provide a concise plan to stabilize containers with high restart counts.",
+    "steps": [
+      {
+        "title": "Check restart counts",
+        "kind": "command",
+        "detail": "docker ps --format '{{.Names}} {{.RestartCount}}' | sort -nrk2 | head",
+        "prompt": "Identify which containers exceed policy thresholds."
+      },
+      {
+        "title": "Review healthchecks",
+        "kind": "command",
+        "detail": "docker inspect --format '{{json .State.Health}}' {{container}}",
+        "prompt": "If healthchecks are too strict, recommend tuning intervals and retries."
+      },
+      {
+        "title": "Resource constraints",
+        "kind": "analysis",
+        "detail": "Compare container CPU/memory limits vs host availability.",
+        "prompt": "Suggest raising limits or reducing noisy workloads."
+      }
+    ]
+  }
+]
