@@ -101,6 +101,87 @@ COMMON_PORTS = [
 ]
 
 QUICK_WIFI_PORTS = [80, 443, 8080, 8443, 22, 23, 53, 161, 5000, 8000]
+# Wi-Fi sweeps should be a bit deeper to reveal noisy services on gateways.
+WIFI_SWEEP_PORTS = sorted(
+    set(
+        QUICK_WIFI_PORTS
+        + [
+            53,
+            67,
+            68,
+            110,
+            135,
+            137,
+            139,
+            161,
+            389,
+            445,
+            465,
+            500,
+            514,
+            515,
+            548,
+            554,
+            587,
+            631,
+            853,
+            873,
+            993,
+            995,
+            1723,
+            1900,
+            2049,
+            2181,
+            2375,
+            2377,
+            2483,
+            27017,
+            27018,
+            27019,
+            3000,
+            3001,
+            32400,
+            3260,
+            3306,
+            3389,
+            3689,
+            4443,
+            4444,
+            4789,
+            5001,
+            5050,
+            5353,
+            5357,
+            5432,
+            5555,
+            5672,
+            5683,
+            5900,
+            5985,
+            5986,
+            6000,
+            6379,
+            6443,
+            6481,
+            8000,
+            8200,
+            8444,
+            8500,
+            8529,
+            8530,
+            8531,
+            8532,
+            8888,
+            9000,
+            9100,
+            9200,
+            9300,
+            9443,
+            10000,
+            11211,
+        ]
+    )
+)
 
 SERVICE_NAMES = {
     21: "FTP",
@@ -728,13 +809,45 @@ def quick_port_scan(host: str, ports: list[int] | None = None) -> list[int]:
     open_ports: list[int] = []
     for port in target_ports:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.settimeout(0.4)
+            sock.settimeout(0.35)
             try:
                 sock.connect((host, port))
                 open_ports.append(port)
             except Exception:
                 continue
     return open_ports
+
+
+def _sync_banner_probe(sock: socket.socket, port: int) -> str:
+    try:
+        if port in {80, 8000, 8080, 3000, 3001, 5000, 32400}:
+            sock.sendall(b"HEAD / HTTP/1.0\r\nHost: gateway\r\n\r\n")
+        elif port in {443, 4443, 4444, 8443, 9443}:
+            sock.sendall(b"HEAD / HTTP/1.0\r\nHost: gateway\r\n\r\n")
+        elif port in {23, 21, 25, 110, 143, 993, 995}:
+            sock.sendall(b"\r\n")
+        elif port in {22, 3389, 5900}:
+            sock.settimeout(0.5)
+
+        sock.settimeout(0.6)
+        data = sock.recv(220)
+        decoded = data.decode(errors="ignore")
+        return AsyncScanner._clean_banner(decoded)
+    except Exception:
+        return ""
+
+
+def wifi_port_scan(host: str, ports: list[int] | None = None) -> list[tuple[int, str]]:
+    target_ports = ports or WIFI_SWEEP_PORTS
+    findings: list[tuple[int, str]] = []
+    for port in target_ports:
+        try:
+            with socket.create_connection((host, port), timeout=0.45) as sock:
+                banner = _sync_banner_probe(sock, port)
+                findings.append((port, banner))
+        except Exception:
+            continue
+    return findings
 
 
 class ScannerApp(tk.Tk):
@@ -951,7 +1064,7 @@ class ScannerApp(tk.Tk):
         def worker():
             networks = discover_wifi_networks()
             gateways = _default_gateways()
-            gateway_ports = {gw: quick_port_scan(gw) for gw in gateways}
+            gateway_ports = {gw: wifi_port_scan(gw) for gw in gateways}
             self.result_queue.put(("wifi_done", (networks, gateways, gateway_ports)))
 
         self.wifi_thread = threading.Thread(target=worker, daemon=True)
@@ -1121,13 +1234,20 @@ class ScannerApp(tk.Tk):
             ttk.Label(gateway_frame, text=f"Reachable gateways: {details}").pack(anchor="w")
 
     @staticmethod
-    def _format_port_list(ports: list[int]) -> str:
+    def _format_port_list(ports) -> str:
         if not ports:
             return ""
         labels = []
-        for port in sorted(ports):
+        for entry in sorted(ports, key=lambda x: x[0] if isinstance(x, tuple) else x):
+            if isinstance(entry, tuple):
+                port, banner = entry
+            else:
+                port, banner = entry, ""
             name = SERVICE_NAMES.get(port)
-            labels.append(f"{port} ({name})" if name else str(port))
+            base = f"{port} ({name})" if name else str(port)
+            if banner:
+                base += f" → {banner}"
+            labels.append(base)
         return ", ".join(labels)
 
     def _update_summary(self):
