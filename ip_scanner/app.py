@@ -749,6 +749,7 @@ def discover_wifi_networks() -> list[dict[str, str]]:
             ssid = None
             security = ""
             signal = ""
+            bssid = ""
             for line in proc.stdout.splitlines():
                 stripped = line.strip()
                 if stripped.startswith("SSID") and ":" in stripped:
@@ -758,12 +759,16 @@ def discover_wifi_networks() -> list[dict[str, str]]:
                                 "ssid": ssid or "<hidden>",
                                 "security": security or "Unknown",
                                 "signal": signal or "",
+                                "bssid": bssid,
                                 "active": bool(ssid == current),
                             }
                         )
                     ssid = stripped.split(":", 1)[1].strip()
                     security = ""
                     signal = ""
+                    bssid = ""
+                elif stripped.startswith("BSSID") and ":" in stripped:
+                    bssid = stripped.split(":", 1)[1].strip()
                 elif stripped.startswith("Authentication") and ":" in stripped:
                     security = stripped.split(":", 1)[1].strip()
                 elif stripped.startswith("Signal") and ":" in stripped:
@@ -774,6 +779,7 @@ def discover_wifi_networks() -> list[dict[str, str]]:
                         "ssid": ssid or "<hidden>",
                         "security": security or "Unknown",
                         "signal": signal or "",
+                        "bssid": bssid,
                         "active": bool(ssid == current),
                     }
                 )
