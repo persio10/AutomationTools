@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Atlas Ops Copilot</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 0; padding: 0; background: #0f172a; color: #e2e8f0; }
+    header { background: #111827; padding: 16px; display: flex; justify-content: space-between; align-items: center; position: sticky; top: 0; z-index: 1; }
+    h1 { margin: 0; font-size: 20px; }
+    main { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 16px; }
+    section { background: #1f2937; border-radius: 8px; padding: 12px; box-shadow: 0 2px 6px rgba(0,0,0,0.35); }
+    .filters { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    label { font-size: 13px; color: #cbd5e1; }
+    select, input { background: #0b1220; color: #e2e8f0; border: 1px solid #334155; padding: 6px 8px; border-radius: 6px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+    th, td { padding: 6px; border-bottom: 1px solid #334155; font-size: 13px; }
+    .pill { display: inline-block; padding: 2px 6px; border-radius: 10px; font-size: 11px; margin-right: 4px; background: #0ea5e9; color: #0b1220; }
+    .severity-info { background: #22c55e; color: #052e16; }
+    .severity-warning { background: #fbbf24; color: #422006; }
+    .severity-critical { background: #ef4444; color: #450a0a; }
+    .signal-card { border: 1px solid #334155; border-radius: 6px; padding: 8px; margin-top: 8px; background: #0b1220; }
+    .site-card { margin-top: 6px; padding: 8px; border: 1px solid #334155; border-radius: 6px; background: #0b1220; }
+    .flex-between { display: flex; justify-content: space-between; align-items: center; }
+    .tags { display: flex; flex-wrap: wrap; gap: 4px; }
+    .small { font-size: 12px; color: #94a3b8; }
+    .suggestion { border-left: 3px solid #0ea5e9; padding-left: 8px; margin-top: 6px; }
+    .section-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Atlas Ops Copilot</h1>
+    <div class="filters">
+      <label>Site <select id="filter-site"></select></label>
+      <label>Severity <select id="filter-severity">
+        <option value="">any</option>
+        <option value="info">info</option>
+        <option value="warning">warning</option>
+        <option value="critical">critical</option>
+      </select></label>
+      <label>Search <input type="text" id="filter-search" placeholder="search runbooks/signals" /></label>
+      <label>Time window <select id="filter-window">
+        <option value="">all</option>
+        <option value="3600">last hour</option>
+        <option value="21600">last 6h</option>
+        <option value="86400">last day</option>
+      </select></label>
+      <button onclick="refreshData()">Refresh</button>
+    </div>
+  </header>
+  <main>
+    <section>
+      <div class="flex-between"><h2>Signals</h2><span class="small" id="signal-count"></span></div>
+      <div id="signals"></div>
+    </section>
+    <section>
+      <div class="flex-between"><h2>Runbooks</h2><span class="small" id="runbook-count"></span></div>
+      <div id="runbooks"></div>
+    </section>
+    <section>
+      <h2>Suggestions</h2>
+      <div id="suggestions"></div>
+    </section>
+    <section>
+      <h2>Sites & Integrations</h2>
+      <div id="sites"></div>
+    </section>
+  </main>
+  <script>
+    const apiBase = window.location.origin;
+    let sites = [];
+    let signals = [];
+    let runbooks = [];
+    let suggestions = [];
+
+    async function fetchJson(path) {
+      const resp = await fetch(path);
+      if (!resp.ok) throw new Error(`Request failed: ${resp.status}`);
+      return resp.json();
+    }
+
+    async function loadData() {
+      [sites, signals, runbooks, suggestions] = await Promise.all([
+        fetchJson('/api/sites'),
+        fetchJson('/api/signals'),
+        fetchJson('/api/runbooks'),
+        fetchJson('/api/suggestions'),
+      ]);
+      populateFilters();
+    }
+
+    function populateFilters() {
+      const siteSelect = document.getElementById('filter-site');
+      siteSelect.innerHTML = '<option value="">all sites</option>' + sites.map(s => `<option value="${s.id}">${s.name}</option>`).join('');
+      render();
+    }
+
+    function filterSignals() {
+      const site = document.getElementById('filter-site').value;
+      const severity = document.getElementById('filter-severity').value;
+      const windowSec = parseInt(document.getElementById('filter-window').value || '0', 10);
+      const cutoff = windowSec ? Date.now() - windowSec * 1000 : 0;
+      return signals.filter(sig => {
+        const matchesSite = site ? sig.site_id === site : true;
+        const matchesSeverity = severity ? sig.severity === severity : true;
+        const matchesTime = cutoff ? new Date(sig.observed_at).getTime() >= cutoff : true;
+        return matchesSite && matchesSeverity && matchesTime;
+      });
+    }
+
+    function renderSignals() {
+      const container = document.getElementById('signals');
+      const search = document.getElementById('filter-search').value.toLowerCase();
+      const filtered = filterSignals().filter(sig => sig.summary.toLowerCase().includes(search) || JSON.stringify(sig.detail).toLowerCase().includes(search));
+      document.getElementById('signal-count').innerText = `${filtered.length} shown`;
+      container.innerHTML = filtered.map(sig => {
+        const linked = suggestions.filter(s => s.signal_id === sig.id);
+        return `<div class="signal-card">
+          <div class="flex-between"><strong>${sig.summary}</strong><span class="pill severity-${sig.severity}">${sig.severity}</span></div>
+          <div class="small">${sig.site_id} • ${new Date(sig.observed_at).toLocaleString()} • ${sig.kind}</div>
+          <div class="small">${JSON.stringify(sig.detail)}</div>
+          ${linked.map(s => `<div class="suggestion"><strong>${s.summary}</strong><div class="small">${s.reason}</div><div class="small">Runbooks: ${s.related_runbook_ids.join(', ')}</div></div>`).join('')}
+        </div>`;
+      }).join('');
+    }
+
+    function renderRunbooks() {
+      const container = document.getElementById('runbooks');
+      const search = document.getElementById('filter-search').value.toLowerCase();
+      const filtered = runbooks.filter(rb => rb.title.toLowerCase().includes(search) || (rb.summary||'').toLowerCase().includes(search) || (rb.tags||[]).some(t => t.toLowerCase().includes(search)));
+      document.getElementById('runbook-count').innerText = `${filtered.length} available`;
+      container.innerHTML = filtered.map(rb => {
+        const hits = suggestions.filter(s => s.related_runbook_ids.includes(rb.id)).length;
+        return `<div class="signal-card">
+          <div class="flex-between"><strong>${rb.title}</strong><span class="small">${hits} recent signal(s)</span></div>
+          <div class="small">${rb.summary}</div>
+          <div class="tags">${(rb.tags||[]).map(t => `<span class="pill">${t}</span>`).join('')}</div>
+          ${rb.prompt_template ? `<div class="small">AI hint: ${rb.prompt_template}</div>` : ''}
+        </div>`;
+      }).join('');
+    }
+
+    function renderSuggestions() {
+      const container = document.getElementById('suggestions');
+      const filtered = suggestions;
+      container.innerHTML = filtered.map(s => `<div class="signal-card">
+        <div class="flex-between"><strong>${s.summary}</strong><span class="pill severity-${s.severity}">${s.severity}</span></div>
+        <div class="small">${s.reason}</div>
+        <div class="small">Runbooks: ${s.related_runbook_ids.join(', ')}</div>
+      </div>`).join('');
+    }
+
+    function renderSites() {
+      const container = document.getElementById('sites');
+      container.innerHTML = sites.map(site => `<div class="site-card">
+        <div class="flex-between"><strong>${site.name}</strong><span class="small">${site.id}</span></div>
+        <div class="small">${site.description || ''}</div>
+        <div class="small">Networks: ${JSON.stringify(site.networks || {})}</div>
+        <div class="small">Integrations: ${(site.integrations||[]).map(i => `${i.name || i.type} (${i.status||'n/a'})`).join(', ') || 'none'}</div>
+      </div>`).join('');
+    }
+
+    function render() {
+      renderSignals();
+      renderRunbooks();
+      renderSuggestions();
+      renderSites();
+    }
+
+    async function refreshData() {
+      await loadData();
+      render();
+    }
+
+    document.getElementById('filter-site').addEventListener('change', render);
+    document.getElementById('filter-severity').addEventListener('change', render);
+    document.getElementById('filter-window').addEventListener('change', render);
+    document.getElementById('filter-search').addEventListener('input', render);
+
+    loadData().then(render).catch(err => {
+      document.body.innerHTML = `<div style="padding:20px;color:#ef4444;">Failed to load data: ${err}</div>`;
+    });
+  </script>
+</body>
+</html>

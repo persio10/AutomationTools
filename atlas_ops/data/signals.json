@@ -1,0 +1,20 @@
+[
+  {
+    "source": "agent",
+    "site_id": "site-homelab",
+    "kind": "integration",
+    "summary": "Docker API unreachable on tcp://192.168.10.30:2375",
+    "detail": {"service": "docker", "host": "192.168.10.30", "port": 2375, "status": "down"},
+    "severity": "warning",
+    "observed_at": "2025-01-01T10:00:00Z"
+  },
+  {
+    "source": "agent",
+    "site_id": "site-homelab",
+    "kind": "wifi",
+    "summary": "Gateway latency rising on 192.168.10.1",
+    "detail": {"gateway": "192.168.10.1", "avg_latency_ms": 85, "loss_pct": 2},
+    "severity": "info",
+    "observed_at": "2025-01-01T10:05:00Z"
+  }
+]
